@@ -10,7 +10,7 @@ RMC_REGEX = re.compile(r"\$GPRMC,(\d{2})(\d{2})(\d{2}\.\d+),A,(\d{2})(\d+\.\d+),
 def format_datetime(utc_hours, utc_minutes, utc_seconds, date):
     """Format datetime as YY-MM-DD_HH:MM:SSZ, return None if date is '000000'."""
     if date == "000000":
-        return None  # Return None so we can filter out invalid rows
+        return None  # Remove invalid dates
 
     day = date[:2]
     month = date[2:4]
@@ -23,7 +23,7 @@ def format_datetime(utc_hours, utc_minutes, utc_seconds, date):
 
 def convert_gps_to_custom_format(input_file, output_annotations):
     """Parses GPS log file, converts Lat/Long to decimal degrees, and saves in custom format."""
-    data = []
+    data = {}
 
     try:
         with open(input_file, "r") as file:
@@ -31,18 +31,10 @@ def convert_gps_to_custom_format(input_file, output_annotations):
                 gga_match = GGA_REGEX.match(line)
                 rmc_match = RMC_REGEX.match(line)
 
-                if rmc_match:
-                    h, m, s, lat_deg, lat_min, lat_dir, lon_deg, lon_min, lon_dir, speed, course, date = rmc_match.groups()
-                    altitude = None  # Altitude comes from GGA
+                if gga_match:
+                    h, m, s, lat_deg, lat_min, lat_dir, lon_deg, lon_min, lon_dir, altitude = gga_match.groups()
+                    key = f"{h}:{m}:{int(float(s))}Z"  # Unique timestamp key
 
-                    # Format date & time
-                    formatted_datetime = format_datetime(h, m, s, date)
-
-                    # Skip this row if the date is invalid (i.e., '000000')
-                    if formatted_datetime is None:
-                        continue
-
-                    # Convert Lat/Lon to decimal degrees
                     latitude = float(lat_deg) + float(lat_min) / 60
                     if lat_dir == "S":
                         latitude = -latitude
@@ -51,26 +43,50 @@ def convert_gps_to_custom_format(input_file, output_annotations):
                     if lon_dir == "W":
                         longitude = -longitude
 
-                    # Store valid data
-                    data.append((formatted_datetime, latitude, longitude, altitude, speed, course))
+                    # Store altitude if available
+                    if key not in data:
+                        data[key] = {"lat": latitude, "lon": longitude, "altitude": altitude, "course": None, "speed": None, "date": None}
+
+                if rmc_match:
+                    h, m, s, lat_deg, lat_min, lat_dir, lon_deg, lon_min, lon_dir, speed, course, date = rmc_match.groups()
+                    formatted_datetime = format_datetime(h, m, s, date)
+
+                    # Skip invalid dates
+                    if formatted_datetime is None:
+                        continue
+
+                    key = f"{h}:{m}:{int(float(s))}Z"
+
+                    latitude = float(lat_deg) + float(lat_min) / 60
+                    if lat_dir == "S":
+                        latitude = -latitude
+
+                    longitude = float(lon_deg) + float(lon_min) / 60
+                    if lon_dir == "W":
+                        longitude = -longitude
+
+                    if key not in data:
+                        data[key] = {"lat": latitude, "lon": longitude, "altitude": None, "course": course, "speed": speed, "date": formatted_datetime}
+                    else:
+                        data[key]["course"] = course
+                        data[key]["speed"] = speed
+                        data[key]["date"] = formatted_datetime
 
         # Write data to file
         with open(output_annotations, "w") as f:
             f.write("Annotation Container File, Version, 1.0, ROVER (64-Bit) Version: 4.24.3.500.2\n")
 
-            for entry in data:
-                formatted_datetime, lat, lon, altitude, speed, course = entry
-                
-                # Ensure altitude and metadata fields are properly handled
-                alt_value = altitude if altitude else "10.00000000186265"
-                speed_value = speed if speed else "0.0"
-                course_value = course if course else "0.0"
+            for key, entry in sorted(data.items()):
+                if entry["date"] is None:  # Skip any missing date records
+                    continue
 
-                # First line with altitude
-                f.write(f"SITE,{formatted_datetime},{lat},{lon},{alt_value},AGL,0xffffffff,,,,,-1\n")
+                lat, lon = entry["lat"], entry["lon"]
+                altitude = entry["altitude"] if entry["altitude"] else "10.00000000186265"
+                course = entry["course"] if entry["course"] else "0.0"
+                speed = entry["speed"] if entry["speed"] else "0.0"
 
-                # Second line with metadata
-                f.write(f"SITE,{formatted_datetime} (2),{lat},{lon},10.00000000186265,AGL,0xffffffff,,,,Course (°);{course_value};Speed (knots);{speed_value},-1\n")
+                # Single row per unique timestamp with all info in one row
+                f.write(f"SITE,{entry['date']},{lat},{lon},{altitude},AGL,0xffffffff,,,,,Course (°);{course};Speed (knots);{speed},-1\n")
 
         return f"Success! File saved as: {output_annotations}"
 
